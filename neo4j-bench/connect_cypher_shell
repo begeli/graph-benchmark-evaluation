@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+
+# Connects you to the first core server of the current cluster
+
+core_host=$(scontrol show hostnames ${SLURM_JOB_NODELIST} | head -n 1)
+
+base_command="singularity exec neo4j_enterprise.sif cypher-shell"
+base_command="${base_command} -u neo4j -p test -a neo4j://${core_host}:7687"
+
+module load singularity/3.6.4
+
+echo -n 'Waiting for neo4j start...'
+while true
+do
+    echo -n '.'
+    echo "" | ${base_command} && break || sleep 3
+done
+echo
+
+${base_command} $@

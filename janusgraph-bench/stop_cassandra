@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+
+srun --kill-on-bad-exit=0 singularity instance stop --timeout 30 cassandra

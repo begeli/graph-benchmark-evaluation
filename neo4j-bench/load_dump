@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+
+set -Eeuo pipefail
+trap cleanup SIGINT SIGTERM ERR EXIT
+
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" &>/dev/null && pwd -P)
+
+usage() {
+  cat << EOF # remove the space between << and EOF, this is due to web plugin issue
+Usage: $(basename "${BASH_SOURCE[0]}") [-h] [-c <NUM>] -d <NAME> -f <DUMP> [-v]
+
+This script load a specified dump into the core servers of a neo4j causal
+cluster. It is expected that the cluster already ran with the desired number of
+cores (i.e. directories are created), but is STOPPED at the moment. Further, the
+database to be loaded cannot already exist in the database. If it does, start
+the cluster and drop it.
+
+After having loaded the database, you need to create it in the running cluster
+by executing
+
+    CREATE DATABASE database_name;
+
+To improve performance you might want to add some indices to the graph like so:
+
+    CREATE INDEX FOR (n:Person) ON (n.personId);
+
+
+Available options:
+
+-h, --help               Print this help and exit
+-c, --cores <NUM>        Number of core severs to load dump [default: 3]
+    --base-dir <PATH>    Base directory for containers [default:
+                         /scratch/snx3000/${USER}/neo4j-bench]
+-d, --database <NAME>    Name of database to load
+-f, --from <DUMP>        Path to dump file to load data from (idealy absolute)
+-v, --verbose            Print more information on execution
+EOF
+  exit
+}
+
+cleanup() {
+    trap - SIGINT SIGTERM ERR EXIT
+    # script cleanup here
+}
+
+msg() {
+    echo >&2 -e "${1-}"
+}
+
+die() {
+    local msg=$1
+    local code=${2-1} # default exit status 1
+    msg "$msg"
+    exit "$code"
+}
+
+parse_params() {
+    # default values
+    num_cores=3
+    base_dir="/scratch/snx3000/${USER}/neo4j-bench"
+    verbose=false
+
+    while :; do
+        case "${1-}" in
+            -h | --help) usage ;;
+            --debug) set -x ;;
+            -v | --verbose) verbose=true ;;
+            --base-dir) # Base directory
+                base_dir="${2-}"
+                shift
+                ;;
+            -c | --cores) # Number of core servers
+                num_cores="${2-}"
+                shift
+                ;;
+            -d | --database) # Database name
+                db_name="${2-}"
+                shift
+                ;;
+            -f | --from) # Path to dumb file
+                dump_file="${2-}"
+                shift
+                ;;
+            -?*) die "Unknown option: $1" ;;
+            *) break ;;
+        esac
+        shift
+    done
+
+    args=("$@")
+
+    # check required params and arguments
+    [[ -z ${db_name-} ]] && die "Missing database name: --database <NAME>"
+    [[ -z ${dump_file-} ]] && die "Missing dump file: --from <DUMP>"
+    [[ ${#args[@]} -ne 0 ]] && die "unexpected arguments: ${args}"
+    
+    return 0
+}
+
+parse_params "$@"
+
+echo "Loading database '${db_name}' from ${dump_file} to ${num_cores} cores..."
+
+srun --nodes=${num_cores} --ntasks-per-node=1 \
+    ./load_dump_instance ${base_dir} ${dump_file} ${db_name}
+

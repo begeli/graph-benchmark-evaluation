@@ -1,0 +1,157 @@
+#!/usr/bin/env bash
+
+set -Eeuo pipefail
+trap cleanup SIGINT SIGTERM ERR EXIT
+
+# TODO make parameter
+
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" &>/dev/null && pwd -P)
+
+usage() {
+  cat << EOF
+Usage: $(basename "${BASH_SOURCE[0]}") [-h] --type (core|replica) --id <ID> [--base_dir <PATH>]
+
+Start one node instance of a neo4j causal cluster. This script is primarily used
+by './start_neo4j'.
+
+Available options:
+
+-h, --help               Print this help and exit
+-t, --type <TYPE>        Specify the type of the instance. ('core' or 'replica')
+-i, --id <ID>            ID of the instance
+    --base-dir           Base directory
+                           [default: /scratch/snx3000/${USER}/neo4j-bench]
+    --import-dir <PATH>  Overwrite the import directory to mount instead of
+                           'runtime/import/<TYPE><ID>'. The director will be
+                           created if it doesn't exist.
+-v, --verbose            Print more information on execution
+EOF
+  exit
+}
+
+cleanup() {
+  trap - SIGINT SIGTERM ERR EXIT
+  # script cleanup here
+}
+
+msg() {
+  echo >&2 -e "${1-}"
+}
+
+die() {
+  local msg=$1
+  local code=${2-1} # default exit status 1
+  msg "$msg"
+  exit "$code"
+}
+
+parse_params() {
+  # default values
+  base_dir="/scratch/snx3000/${USER}/neo4j/bench"
+  verbose=false
+
+  while :; do
+    case "${1-}" in
+      -h | --help) usage ;;
+      --debug) set -x ;;
+      -v | --verbose) verbose=true ;;
+      -t | --type) # Instance type
+        case "${2-}" in
+        core)
+              db_mode="CORE"
+              instance_type="core"
+              ;;
+        replica)
+          db_mode="READ_REPLICA"
+              instance_type="replica"
+              ;;
+            -?*) die "Unknown instance type: ${2-}, possible options: core, replica" ;;
+        esac
+        shift
+        ;;
+      -i | --id) # Instance id
+        instance_id=$(printf "%02d" ${2-})
+        shift
+        ;;
+      --base-dir) # Base directory
+        base_dir="${2-}"
+        shift
+        ;;
+      --import-dir) # Import directory
+        import_dir="${2-}"
+        shift
+        ;;
+      -?*) die "Unknown option: $1" ;;
+      *) break ;;
+    esac
+    shift
+  done
+
+  args=("$@")
+
+  # check required params and arguments
+  [[ -z ${instance_type-} ]] && die "Missing instance type: add --type (core|replica)"
+  [[ -z ${instance_id-} ]] && die "Missing instance id: add --id <ID>"
+  [[ ${#args[@]} -ne 0 ]] && die "unexpected arguments: ${args}"
+
+  return 0
+}
+
+parse_params "$@"
+
+
+echo "Creating ${instance_type}${instance_id}..."
+echo
+
+default_import_dir="${base_dir}/runtime/import/${instance_type}${instance_id}/"
+# define relevant paths
+data_dir="${base_dir}/runtime/data/${instance_type}${instance_id}/"
+log_dir="${base_dir}/runtime/logs/${instance_type}${instance_id}/"
+conf_dir="${base_dir}/runtime/conf/${instance_type}${instance_id}/"
+plugin_dir="${base_dir}/plugins"
+import_dir="${import_dir:-$default_import_dir}"
+
+# Verbose output
+if [[ ${verbose} == true ]];
+then
+    echo "Using (and creating) the following directories:"
+    echo " - data: ${data_dir}"
+    echo " - logs: ${log_dir}"
+    echo " - conf: ${conf_dir}"
+    echo " - import: ${import_dir}"
+    echo " - plugins: ${plugin_dir}"
+    echo
+    echo "Using the following files for container configuration"
+    echo " - ${base_dir}/runtime/core_server_list"
+    echo " - ${base_dir}/runtime/number_core_servers"
+echo
+fi
+
+# make sure directories exist
+mkdir -p ${data_dir}
+mkdir -p ${log_dir}
+mkdir -p ${conf_dir}
+mkdir -p ${import_dir}
+
+module load singularity/3.6.4
+
+# Start instance
+singularity instance start \
+    --writable-tmpfs \
+    --bind ${base_dir}/neo4j.conf:/conf/neo4j.conf \
+    --bind ${base_dir}/runtime/core_server_list:/core_server_list \
+    --bind ${base_dir}/runtime/number_core_servers:/number_core_servers \
+    --bind ${data_dir}:/data \
+    --bind ${log_dir}:/logs \
+    --bind ${plugin_dir}:/plugins \
+    --bind ${conf_dir}:/var/lib/neo4j/conf \
+    --bind ${import_dir}:/var/lib/neo4j/import \
+    --env NEO4J_AUTH=neo4j/test \
+    --env TINI_SUBREAPER=true \
+    --env NEO4J_dbms_mode=${db_mode} \
+    --env EXTENDED_CONF=yes \
+    --env NEO4J_ACCEPT_LICENSE_AGREEMENT=yes \
+    ${base_dir}/neo4j_enterprise.sif neo4j
+
+singularity instance list --logs
+

@@ -1,0 +1,158 @@
+#!/usr/bin/env bash
+
+set -Eeuo pipefail
+trap cleanup SIGINT SIGTERM ERR EXIT
+
+usage() {
+  cat << EOF
+Usage: $(basename "${BASH_SOURCE[0]}") [-c <BACKEND_COUNT>] [-b <BENCHMARK_COUNT>]
+
+Start janusgraph cluster with the specified number of backend nodes and benchmarking
+nodes. This script is expected to be executed inside a slurm allocation and the number 
+allocated nodes is equal to or greater than the number of servers in the cluster. If
+either of these requirements is not met, the script will fail.
+
+Available options:
+
+-h, --help      Print this help and exit
+-c, --cassandra Number of nodes where Cassandra backend will run
+                  [default: 3]
+-b, --benchmark Number of nodes where benchmarking code will run
+                  [default: 0]
+-n, --tasks     Number of queries to execute per thread
+                  [default: 1000]
+EOF
+  exit
+}
+
+cleanup() {
+  trap - SIGINT SIGTERM ERR EXIT
+  # script cleanup here
+}
+
+msg() {
+  echo >&2 -e "${1-}"
+}
+
+die() {
+  local msg=$1
+  local code=${2-1} # default exit status 1
+  msg "$msg"
+  exit "$code"
+}
+
+parse_params() {
+   num_cassandra=3
+   num_benchmarks=0
+   num_tasks=1000
+
+   while :; do
+    case "${1-}" in
+    -h | --help) usage ;;
+    -v | --verbose) set -x ;;
+    -c | --cassandra) 
+      num_cassandra="${2-}"
+      shift
+      ;;
+    -b | --benchmark)
+      num_benchmarks="${2-}"
+      shift
+      ;;
+    -n | --tasks)
+      num_tasks="${2-}"
+      shift
+      ;;
+    -?*) die "Unknown option: $1" ;;
+    *) break ;;
+    esac
+    shift
+  done
+
+  args=("$@")
+
+  return 0
+}
+
+function join_by {
+   local delimiter=${1-} list=${2-}
+   if shift 2; then
+      printf %s "$list" "${@/#/$delimiter}"
+   fi
+}
+
+parse_params "$@"
+
+# Check if neccessary slurm variables are set
+[[ -z "${SLURM_JOB_NUM_NODES+x}" ]] && die "SLURM_JOB_NUM_NODES seems to be unset, make sure you running inside a job allocation!" 
+[[ -z "${SLURM_JOB_NODELIST+x}" ]] && die "SLURM_JOB_NODELIST seems to be unset, make sure you running inside a job allocation!" 
+
+num_servers=$((${num_cassandra} + ${num_benchmarks}))
+
+# Check if values make sense
+[[ ${num_servers} -gt ${SLURM_JOB_NUM_NODES} ]] && die "Need ${num_cassandra} + ${num_benchmarks} = ${num_servers} nodes, but only allocated ${SLURM_JOB_NUM_NODES}!"
+[[ ${num_servers} -lt ${SLURM_JOB_NUM_NODES} ]] && msg "Warning: Allocated ${SLURM_JOB_NUM_NODES} nodes, but only need ${num_cassandra} + ${num_benchmarks} = ${num_servers}."
+
+[[ ${num_benchmarks} -gt 0 ]] && benchmark_list=$(scontrol show hostnames ${SLURM_JOB_NODELIST} | tail -n +$((${num_cassandra} + 1)) | head -n ${num_benchmarks})
+[[ ${num_benchmarks} -eq 0 ]] && benchmark_list=""
+
+if [ ${num_servers} -lt ${SLURM_JOB_NUM_NODES} ]
+then
+    echo "Warning: The following hosts will be unused:"
+    scontrol show hostnames ${SLURM_JOB_NODELIST} | tail -n +$((${num_servers} + 1))
+    echo
+fi
+
+bench_exec="${HOME}/janusgraph-benchmark-tool.jar"
+config_file="${HOME}/janusgraph-cql-server.properties"
+num_threads_per_node=36
+
+for num_nodes in ${num_cassandra}
+do
+   cassandra_server_list=$(
+      scontrol show hostnames ${SLURM_JOB_NODELIST} \
+      | head -n ${num_nodes}
+   )
+
+   cassandra_servers=()
+   for server in "${cassandra_server_list[@]}"
+   do
+      cassandra_servers+=($server)
+   done
+   cassandra_server_str=$(join_by "," "${cassandra_servers[@]}")
+
+   ./create_janusgraph_cql_config --hostname "${cassandra_server_str}" --target-dir ${HOME}
+   ./start_cassandra --nodes "${cassandra_server_str}"
+   ./create_schema --seed ${cassandra_server_list[0]}
+   ./load_snapshot --nodes ${cassandra_server_str}
+
+   module load singularity 
+
+   bench_hosts=$(scontrol show hostnames ${SLURM_JOB_NODELIST} | tail -n ${num_nodes} | paste -sd ',')
+
+   mkdir -p results
+   # You can change the output folders name to whatever you prefer
+   mkdir -p "results/test/cn${num_nodes}"
+
+   output_folder="results/test/cn${num_nodes}/generated-cn${num_nodes}-r$(($num_tasks + 100))-s23-ef16"
+   num_threads=$(($num_nodes * $num_threads_per_node))
+
+   start_time=$(( $(date +%s%N | cut -b1-13) + 30000))
+
+   srun --nodes=${num_nodes} --nodelist=${bench_hosts} \
+   	   ./run_bench_instance ${bench_exec} ${config_file} ${num_tasks} ${num_threads} ${output_folder} \
+   	   -n ${num_tasks} --start-time ${start_time}
+
+   srun --nodes=${num_nodes} --nodelist=${cassandra_server_str} --kill-on-bad-exit=0 singularity instance stop --timeout 30 cassandra
+   rm -rf ./runtime/cassandra
+
+   # Merge all output files - You can change the output file's name to whatever you prefer
+   merge_file="results/test/generated-cn${num_nodes}-r$(($num_tasks + 100))-s23-ef16.csv"
+   awk 'FNR==1{f=1} /\) ;/{f=0} f' ${output_folder}*.csv > ${merge_file}
+   # Insert header into merged output file
+   # This command attaches the header for throughput data - Uncomment this if the benchmark is in throughput mode 
+   # Benchmark mode is determined by the --aggregate flag in the benchmark executable (add or remove it in run_benchmark_instance code)
+   sed -i "1i rank,num_queries,failed_queries,queries_time,barrier_time" ${merge_file}
+
+   # This command attaches the header for latency data - Uncomment this if the benchmark is in latency mode
+   # sed -i "1i rank,query_num,querie_lat" ${merge_file}
+done

@@ -1,0 +1,90 @@
+#!/bin/bash
+
+core_host=$(scontrol show hostnames ${SLURM_JOB_NODELIST} | head -n 1)
+base_command="singularity exec --env NEO4J_AUTH=neo4j/test neo4j_enterprise.sif cypher-shell"
+base_command="${base_command} -u neo4j -p test -a neo4j://${core_host}:7687"
+
+num_cores=3
+num_replicas=2
+num_tasks=1000
+num_threads_per_node=72
+
+bench_exec="${HOME}/neo4j-bench-1.0.jar"
+
+for num_threads in 8 16 32 64 128 256
+do
+    num_bench_hosts=$((($num_threads + $num_threads_per_node - 1) / \
+        $num_threads_per_node))
+    bench_hosts=$(scontrol show hostnames ${SLURM_JOB_NODELIST} | \
+        tail -n ${num_bench_hosts} | paste -sd ',')
+
+    echo
+    echo "Loading DB"
+    ./load_dump --from ../graph500/s23e16.dump --database s23e16
+
+    echo
+    echo "Starting neo4j"
+    ./start_neo4j -c ${num_cores} -r ${num_replicas} || exit 1
+
+    echo -n 'Waiting for neo4j start...'
+    while true
+    do
+        echo -n '.'
+        echo "" | ${base_command} 2> /dev/null && break || sleep 3
+    done
+
+    echo
+    echo 'Neo4j started!'
+
+    ${base_command} << EOF
+CREATE DATABASE s23e16;
+EOF
+    
+    sleep 5
+    
+    while true
+    do
+        ${base_command} -d s23e16 << EOF
+CREATE INDEX FOR (n:Company) ON (n.companyId);
+CREATE INDEX FOR (n:Person) ON (n.personId);
+CREATE INDEX FOR (n:Place) ON (n.placeId);
+CREATE INDEX FOR (n:Project) ON (n.projectId);
+CREATE INDEX FOR (n:Resource) ON (n.ResourceId);
+SHOW INDEX;
+EOF
+        [[ $? -eq 0 ]] && break
+    done
+    
+    sleep 3
+    
+    mkdir -p output
+
+    output_file="output/${num_tasks}x${num_threads}_${num_cores}c${num_replicas}r"
+
+    echo "Running benchmark on following nodes:"
+    echo "${bench_hosts}"
+
+    # start in 30 seconds
+    start_time=$(( $(date +%s%N | cut -b1-13) + 30000))
+
+    srun --nodes=${num_bench_hosts} --nodelist=${bench_hosts} \
+        ./run_bench_instance ${output_file} ${bench_exec} ${num_threads} \
+        -h ${core_host} -n ${num_tasks} -d s23e16 --start-time ${start_time}
+    
+#    ssh ${bench_hosts} <<- EOF
+#	module load singularity
+#	singularity exec scratch/openjdk_11.sif java -jar ${bench_exec} \
+#	-h ${core_host} -t ${num_threads} -n ${num_tasks} \
+#        -d s23e16 > scratch/neo4j-bench/${output_file}
+#	EOF
+    
+    echo "Done! Cleaning up..."
+
+    ${base_command} <<- EOF
+DROP DATABASE s23e16;
+EOF
+
+    ./stop_neo4j
+
+done
+

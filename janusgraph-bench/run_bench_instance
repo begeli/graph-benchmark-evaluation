@@ -1,0 +1,38 @@
+#!/bin/bash
+
+module load singularity
+
+num_threads_per_node=36
+
+bench_exec=${1-}
+shift
+config_file=${1-}
+shift
+num_tasks=${1-}
+shift
+total_threads=${1-}
+shift
+output_file="${1-}-$(hostname).csv"
+shift
+
+num_threads=$((${total_threads} - (${num_threads_per_node} * ${SLURM_NODEID})))
+num_threads=$(( ${num_threads} > 36 ? 36 : ${num_threads} ))
+
+echo "Starting on node $(hostname) with ${num_threads} threads (${SCRATCH}/janusgraph-bench/${output_file})"
+
+# Throughput mode 
+singularity exec docker://openjdk:11-jdk java -jar ${bench_exec} \
+ 	--config ${config_file} \
+	--tasks ${num_tasks} \
+	--aggregate \
+        --threads ${num_threads} \
+	--node-id ${SLURM_NODEID} \
+	--threads-per-node ${num_threads_per_node} > ${SCRATCH}/janusgraph-bench/${output_file}
+
+# Latency mode
+# singularity exec docker://openjdk:11-jdk java -jar ${bench_exec} \
+#        --config ${config_file} \
+#        --tasks ${num_tasks} \
+#        --threads ${num_threads} \
+#        --node-id ${SLURM_NODEID} \
+#        --threads-per-node ${num_threads_per_node} > ${SCRATCH}/janusgraph-bench/${output_file}

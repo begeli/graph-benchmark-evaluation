@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+
+set -Eeuo pipefail
+trap cleanup SIGINT SIGTERM ERR EXIT
+
+usage() {
+   cat << EOF
+Usage: $(basename "${BASH_SOURCE[0]}") --seed <CASSANDRA_SEED>
+
+This script creates the Janusgraph keyspace and related tables 
+in the Cassandra seed. To use this script, you should first create
+the Cassandra cluster and bind the Janusgraph schema folder to 
+'/var/lib/cassandra/schema'. start_cassandra script already does this,
+so, you can first run "./start_cassandra --nodes <NODE_LIST>" as well.
+
+Available options:
+-h, --help Print this help and exit
+    --seed Hostname of the Cassandra seed node
+
+
+EOF
+   exit 
+}
+
+cleanup() {
+   trap - SIGINT SIGTERM ERR EXIT
+}
+
+msg() {
+   echo >&2 -e "${1-}"
+}
+
+die() {
+   local msg=$1
+   local code=${2-1}
+   msg "$msg"
+   exit "$code"
+}
+
+parse_params() {
+   seed=''
+
+   while :; do
+     case "${1-}" in
+     -h | --help) usage;;
+     -v | --verbose) set -x ;;
+     --seed)
+        seed="${2-}"
+        shift
+        ;;
+     -?*) die "Unknown option: $1" ;;
+     *) break;;
+     esac
+     shift
+   done
+
+   args=("$@")
+
+   [[ -z "${seed-}" ]] && die "Missing required parameter:seed"
+
+   return 0
+}
+
+parse_params "$@"
+
+msg
+msg "Creating keyspace and tables in the seed node..."
+msg
+
+# We assume that the Cassandra schema is binded to /var/lib/schema/schema_janusgraph.cql in the Cassandra image
+base_command="singularity exec instance://cassandra cqlsh -u cassandra -p cassandra -e \"source '/var/lib/schema/schema_janusgraph.cql';\""
+
+ssh ${seed} "module load singularity && ${base_command}"
+
+msg
+msg "Keyspace and tables are created."
+msg

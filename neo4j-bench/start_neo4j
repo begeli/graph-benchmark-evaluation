@@ -1,0 +1,193 @@
+#!/bin/bash -l
+#SBATCH --job-name="neo4j"
+#SBATCH --account=g34
+#SBATCH --time=01:00:00
+#SBATCH --nodes=5
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=24
+#SBATCH --partition=normal
+#SBATCH --constraint=mc
+#SBATCH --hint=nomultithread
+
+set -Eeuo pipefail
+trap cleanup SIGINT SIGTERM ERR EXIT
+
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" &>/dev/null && pwd -P)
+
+usage() {
+  cat << EOF
+Usage: $(basename "${BASH_SOURCE[0]}") [-h] [-c <NUM>] [-r <NUM>]
+
+Start a neo4j causal cluster with the specified number of cores and read
+replicas. This script is expected to be executed inside a slurm allocation (be
+it a batch job or a salloc shell), and the number of allocated nodes is equal to
+or greater than the number of servers in the causal cluser. If either of these
+requirements is not met, the script will fail.
+
+Available options:
+
+-h, --help               Print this help and exit
+-c, --cores <NUM>        Number of core servers [default: 3]
+-r, --replicas <NUM>     Number of read replicas [default: 0]
+    --base-dir <PATH>    Base directory [default: /scratch/snx3000/${USER}/neo4j-bench]
+    --import-dir <PATH>  Overwrite default import directory. This mounts the
+                           same import directory on every instance. The
+                           directory needs to already exist.
+EOF
+  exit
+}
+
+cleanup() {
+  trap - SIGINT SIGTERM ERR EXIT
+  # script cleanup here
+}
+
+msg() {
+  echo >&2 -e "${1-}"
+}
+
+die() {
+  local msg=$1
+  local code=${2-1} # default exit status 1
+  msg "$msg"
+  exit "$code"
+}
+
+parse_params() {
+  # default values of variables set from params
+  num_cores=3
+  num_replicas=0
+  base_dir="/scratch/snx3000/${USER}/neo4j-bench"
+
+  while :; do
+    case "${1-}" in
+      -h | --help) usage ;;
+      --debug) set -x ;;
+      -c | --cores) # Number of core servers
+        num_cores="${2-}"
+        shift
+        ;;
+      -r | --replicas) # Number of read replicas
+        num_replicas="${2-}"
+        shift
+        ;;
+      --base-dir) # Base directory
+        base_dir="${2-}"
+        shift
+        ;;
+      --import-dir) # Import directory
+        import_dir="${2-}"
+        shift
+        ;;
+      -?*) die "Unknown option: $1" ;;
+      *) break ;;
+    esac
+    shift
+  done
+
+  args=("$@")
+
+  # check required params and arguments
+  [[ ${#args[@]} -ne 0 ]] && die "Unexpected argument(s): ${args}"
+  [[ ${num_cores} -lt 2 ]] && die "Need at least 2 cores for a cluster, requested ${num_cores}"
+  [[ ${num_replicas} -lt 0 ]] && die "Cannot have negative number of read replicas: ${num_replicas}"
+
+  return 0
+}
+
+parse_params "$@"
+
+# Check if neccessary slurm variables are set
+[[ -z "${SLURM_JOB_NUM_NODES+x}" ]] && die "SLURM_JOB_NUM_NODES seems to be unset, make sure you running inside a job allocation!" 
+[[ -z "${SLURM_JOB_NODELIST+x}" ]] && die "SLURM_JOB_NODELIST seems to be unset, make sure you running inside a job allocation!" 
+
+num_servers=$((${num_cores} + ${num_replicas}))
+
+# Check if values make sense
+[[ ${num_servers} -gt ${SLURM_JOB_NUM_NODES} ]] && die "Need ${num_cores} + ${num_replicas} = ${num_servers} nodes, but only allocated ${SLURM_JOB_NUM_NODES}!"
+[[ ${num_servers} -lt ${SLURM_JOB_NUM_NODES} ]] && msg "Warning: Allocated ${SLURM_JOB_NUM_NODES} nodes, but only need ${num_cores} + ${num_replicas} = ${num_servers}."
+
+mkdir -p ${base_dir}/runtime
+
+# Compute host names of core servers (including port)
+core_server_list=$(
+    scontrol show hostnames ${SLURM_JOB_NODELIST} \
+    | head -n ${num_cores} \
+    | sed -e 's/$/:5000/' \
+    | paste -sd ','
+)
+
+# Write number of core servers and server list to files to be read in containers
+echo ${core_server_list} > ${base_dir}/runtime/core_server_list
+echo ${num_cores} > ${base_dir}/runtime/number_core_servers
+
+core_list=$(scontrol show hostnames ${SLURM_JOB_NODELIST} | head -n ${num_cores})
+
+# need to handle special case where num_replicas is zero, otherwise script crashes
+[[ ${num_replicas} -gt 0 ]] && replica_list=$(scontrol show hostnames ${SLURM_JOB_NODELIST} | tail -n +$((${num_cores} + 1)) | head -n ${num_replicas})
+[[ ${num_replicas} -eq 0 ]] && replica_list=""
+
+# Printing some information about the job
+echo
+echo "Starting Neo4j causal cluster with ${num_cores} core servers and ${num_replicas} read replicas..."
+echo
+echo "List of core server hosts:"
+echo "${core_list}"
+echo
+
+if [[ ${num_replicas} -gt 0 ]]
+then
+  echo "List of read replica hosts:"
+  echo "${replica_list}"
+  echo
+fi
+
+if [ ${num_servers} -lt ${SLURM_JOB_NUM_NODES} ]
+then
+    echo "Warning: The following hosts will be unused:"
+    scontrol show hostnames ${SLURM_JOB_NODELIST} | tail -n +$((${num_servers} + 1))
+    echo
+fi
+
+echo "Core server list file:"
+cat ${base_dir}/runtime/core_server_list
+echo "Number core servers file:"
+cat ${base_dir}/runtime/number_core_servers
+echo
+
+# If import dir is overwritten this variable is filled with the correct flag,
+# otherwise it's empty (but exists).
+pot_import_dir=""
+if ! [[ -z ${import_dir+x} ]]
+then
+    pot_import_dir="--import-dir ${import_dir}"
+
+    echo "Binding '${import_dir}' as import directory on all instances."
+    echo
+fi
+
+# launch core servers
+core_id=0
+for host in $core_list; do
+    echo "=========================================="
+    echo "Starting core ${core_id} on ${host}..."
+    ssh ${host} ${base_dir}/start_neo4j_instance \
+        -t core \
+        -i ${core_id} \
+        --base-dir ${base_dir} ${pot_import_dir}
+
+    ((core_id=core_id+1))
+done
+
+# launch read replicas
+replica_id=0
+for host in $replica_list; do
+    echo "=========================================="
+    echo "Starting replica ${replica_id} on ${host}..."
+    ssh ${host} ${base_dir}/start_neo4j_instance \
+        -t replica \
+        -i ${replica_id} \
+        --base-dir ${base_dir} ${pot_import_dir}
+    ((replica_id=replica_id+1))
+done
+

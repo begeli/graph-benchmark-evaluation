@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+
+set -Eeuo pipefail
+trap cleanup SIGINT SIGTERM ERR EXIT
+
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" &>/dev/null && pwd -P)
+
+usage() {
+  cat << EOF
+Usage: $(basename "${BASH_SOURCE[0]}") --nodes <NODE_LIST> [--base-dir <PATH>] [--delay <DELAY>]
+
+Start a cassandra cluster using the specified nodes. The specified host names
+must be reachable (in the case of piz daint they need to be in the same slurm
+allocation).
+
+Available options:
+
+-h, --help               Print this help and exit
+    --nodes <NODE_LIST>  List of hostnames in slurm list representation to use
+                           for the cluster. Must contain at least one node. If
+                           more than one is specified, the first will be used as
+                           cluster seed for the rest.
+                           Example: nid0000[1-3],nid00042
+    --base-dir <PATH>    Base directory
+                           [default: /scratch/snx3000/${USER}/janusgraph-bench]
+    --delay <DELAY>      Delay between starting two nodes. Provided in format
+                           understood by sleep command, e.g. 90s, 2m, 3h on Piz
+                           Daint. WARNING: Too short of a delay __on the first
+                           start__ and nodes might fail to join. Verify with
+                           'nodetool status' that all nodes joined correctly. 90
+                           seconds worked on Piz Daint.
+                           Restarting an existing cluster (i.e. cluster ran
+                           previously with the same node in the same
+                           configuration) can work without delay (e.g. 1s). 
+                           [default: 90s]
+
+EOF
+  exit
+}
+
+cleanup() {
+  trap - SIGINT SIGTERM ERR EXIT
+  # script cleanup here
+}
+
+msg() {
+  echo >&2 -e "${1-}"
+}
+
+die() {
+  local msg=$1
+  local code=${2-1} # default exit status 1
+  msg "$msg"
+  exit "$code"
+}
+
+parse_params() {
+  # default values of variables set from params
+  node_list=''
+  base_dir="/scratch/snx3000/${USER}/janusgraph-bench"
+  startup_delay="90s"
+
+  while :; do
+    case "${1-}" in
+    -h | --help) usage ;;
+    -v | --verbose) set -x ;;
+    --nodes) # Node list
+      node_list="${2-}"
+      shift
+      ;;
+    --base-dir) # Base directory
+      base_dir="${2-}"
+      shift
+      ;;
+    --delay) # Startup delay
+      startup_delay="${2-}"
+      shift
+      ;;
+    -?*) die "Unknown option: $1" ;;
+    *) break ;;
+    esac
+    shift
+  done
+
+  args=("$@")
+  
+  # check required params and arguments
+  [[ -z "${node_list-}" ]] && die "Missing required parameter: nodes"
+
+  return 0
+}
+
+parse_params "$@"
+
+# parse node list
+node_list_array=($(scontrol show hostnames ${node_list}))
+cassandra_seed="${node_list_array[0]}"
+
+image_path="${base_dir}/cassandra/cassandra.sif"
+config_template_path="${base_dir}/cassandra/cassandra.yaml"
+data_base_dir="${base_dir}/runtime/cassandra/data"
+config_base_dir="${base_dir}/runtime/cassandra/config"
+schema_base_dir="${base_dir}/cassandra/schema"
+
+# create config file 
+seed_ip_address=$(ssh ${cassandra_seed} 'hostname -i' 2> /dev/null)
+./create_cassandra_config --node ${seed_ip_address} --target-dir "${base_dir}/cassandra"
+
+# creating directories
+
+mkdir -p ${config_base_dir}
+
+i=0
+for node in "${node_list_array[@]}"
+do
+    ii=$(printf "%02d" ${i})
+    mkdir -p "${data_base_dir}/${ii}"
+    cp ${config_template_path} "${config_base_dir}/cassandra${ii}.yaml"
+    i=$((i + 1))
+done
+
+# Starting other nodes
+i=0
+for node in "${node_list_array[@]}"
+do
+    ii=$(printf "%02d" ${i})
+
+    msg "Starting node ${ii} on ${node}"
+    ssh -o StrictHostKeyChecking=no ${node} "module load singularity && singularity instance start \
+        --writable-tmpfs \
+        --env CASSANDRA_SEEDS=${cassandra_seed} \
+        --bind ${config_base_dir}/cassandra${ii}.yaml:/etc/cassandra/cassandra.yaml \
+        --bind ${data_base_dir}/${ii}:/var/lib/cassandra \
+	--bind ${schema_base_dir}/schema_janusgraph.cql:/var/lib/schema/schema_janusgraph.cql \
+        ${image_path} cassandra"
+    
+    msg "Giving node time to start... (${startup_delay})"
+    sleep "$startup_delay"
+
+    i=$((i + 1))
+done
+
+msg "Cluster started!"
+msg
+msg "Status:"
+msg
+
+ssh ${cassandra_seed} 'module load singularity && singularity exec instance://cassandra nodetool status'
+

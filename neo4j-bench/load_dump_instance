@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+
+# Not intedned for manual use...
+
+base_dir=${1}
+dump_file=${2}
+db_name=${3}
+
+core_id=$(printf "%02d" ${SLURM_NODEID})
+
+data_dir="${base_dir}/runtime/data/core${core_id}/"
+log_dir="${base_dir}/runtime/logs/core${core_id}/"
+conf_dir="${base_dir}/runtime/conf/core${core_id}/"
+
+module load singularity/3.6.4
+
+echo "Loading ${dump_file} into DB '${db_name}' on core${core_id}..."
+
+# Start instance
+singularity exec \
+    --writable-tmpfs \
+    --bind ${base_dir}/neo4j.conf:/conf/neo4j.conf \
+    --bind ${base_dir}/runtime/core_server_list:/core_server_list \
+    --bind ${base_dir}/runtime/number_core_servers:/number_core_servers \
+    --bind ${data_dir}:/data \
+    --bind ${log_dir}:/logs \
+    --bind ${conf_dir}:/var/lib/neo4j/conf \
+    --bind ${dump_file}:/import.dump \
+    ${base_dir}/neo4j_enterprise.sif \
+    neo4j-admin load \
+    --database=${db_name} \
+    --from=/import.dump \
+    --expand-commands 2> /dev/null
+
+echo "core${core_id} completed import!" 
+

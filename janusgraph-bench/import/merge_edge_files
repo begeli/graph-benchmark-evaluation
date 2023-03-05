@@ -1,0 +1,44 @@
+sed -i "1d" nodes*
+sed -i "1i id:int:ID,name:string,type:string,revenue:long" nodes_Company.csv 
+sed -i "1i id:int:ID,firstName:string,lastName:string,email:string,birthday:string" nodes_Person.csv 
+sed -i "1i id:int:ID,name:string,longitude:long,latitude:long" nodes_Place.csv 
+sed -i "1i id:int:ID,name:string,budget:long" nodes_Project.csv 
+sed -i "1i id:int:ID,name:string,formula:string,density:long,meltingPoint:long" nodes_Resource.csv
+
+awk 'BEGIN{FS=OFS=","} {print (NR>1?"CAN_BE_USED_WITH":":TYPE"), $0}' edges_canBeUsedWith.csv > tmp_edges_canBeUsedWith.csv
+awk 'BEGIN{FS=OFS=","} {print (NR>1?"CAN_USE":":TYPE"), $0}' edges_canUse.csv > tmp_edges_canUse.csv
+awk 'BEGIN{FS=OFS=","} {print (NR>1?"FOUND_AT":":TYPE"), $0}' edges_foundAt.csv > tmp_edges_foundAt.csv
+awk 'BEGIN{FS=OFS=","} {print (NR>1?"HAS_BRANCHES_AT":":TYPE"), $0}' edges_hasBranchesAt.csv > tmp_edges_hasBranchesAt.csv
+awk 'BEGIN{FS=OFS=","} {print (NR>1?"IMPACTS":":TYPE"), $0}' edges_impacts.csv > tmp_edges_impacts.csv
+awk 'BEGIN{FS=OFS=","} {print (NR>1?"IN_BUSINESS_WITH":":TYPE"), $0}' edges_inBusinessWith.csv > tmp_edges_inBusinessWith.csv
+awk 'BEGIN{FS=OFS=","} {print (NR>1?"IN_VICINITY_OF":":TYPE"), $0}' edges_inVicinityOf.csv > tmp_edges_inVicinityOf.csv
+awk 'BEGIN{FS=OFS=","} {print (NR>1?"INFLUENCES":":TYPE"), $0}' edges_influences.csv > tmp_edges_influences.csv
+awk 'BEGIN{FS=OFS=","} {print (NR>1?"IS_PART_OF":":TYPE"), $0}' edges_isPartOf.csv > tmp_edges_isPartOf.csv
+awk 'BEGIN{FS=OFS=","} {print (NR>1?"KNOWS":":TYPE"), $0}' edges_knows.csv > tmp_edges_knows.csv
+awk 'BEGIN{FS=OFS=","} {print (NR>1?"NEEDS":":TYPE"), $0}' edges_needs.csv > tmp_edges_needs.csv
+awk 'BEGIN{FS=OFS=","} {print (NR>1?"SUPPORTS":":TYPE"), $0}' edges_supports.csv > tmp_edges_supports.csv
+awk 'BEGIN{FS=OFS=","} {print (NR>1?"USES":":TYPE"), $0}' edges_uses.csv > tmp_edges_uses.csv
+awk 'BEGIN{FS=OFS=","} {print (NR>1?"WAS_IN":":TYPE"), $0}' edges_wasIn.csv > tmp_edges_wasIn.csv
+awk 'BEGIN{FS=OFS=","} {print (NR>1?"WORKS_AT":":TYPE"), $0}' edges_worksAt.csv > tmp_edges_worksAt.csv
+
+sed -i '1d' tmp_edges_canBeUsedWith.csv
+sed -i '1d' tmp_edges_canUse.csv
+sed -i '1d' tmp_edges_foundAt.csv
+sed -i '1d' tmp_edges_hasBranchesAt.csv
+sed -i '1d' tmp_edges_impacts.csv
+sed -i '1d' tmp_edges_inBusinessWith.csv
+sed -i '1d' tmp_edges_inVicinityOf.csv
+sed -i '1d' tmp_edges_influences.csv
+sed -i '1d' tmp_edges_isPartOf.csv
+sed -i '1d' tmp_edges_knows.csv
+sed -i '1d' tmp_edges_needs.csv
+sed -i '1d' tmp_edges_supports.csv
+sed -i '1d' tmp_edges_uses.csv
+sed -i '1d' tmp_edges_wasIn.csv
+sed -i '1d' tmp_edges_worksAt.csv
+
+awk 'FNR==1{f=1} /\) ;/{f=0} f' tmp_*.csv > edges.csv
+sed -i "1i :TYPE,id:int:START_ID,id:int:END_ID" edges.csv
+
+rm edges_*
+rm tmp*

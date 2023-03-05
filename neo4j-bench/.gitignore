@@ -1,0 +1,8 @@
+
+# Ignore runtime directory
+runtime/
+output/
+
+import_lpg1
+
+*.out

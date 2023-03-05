@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+
+module load singularity/3.6.4
+
+srun --kill-on-bad-exit=0 singularity instance stop --timeout 30 'neo4j*'
