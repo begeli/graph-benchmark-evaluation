@@ -1,6 +1,6 @@
 # janusgraph-bench
 
-Scripts needed to benchmark JanusGraph on the Piz Daint super computer
+Scripts needed to benchmark JanusGraph on the Piz Daint supercomputer
 
 ## Benchmark set up and Folder structure 
 
