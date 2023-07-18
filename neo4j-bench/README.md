@@ -1,5 +1,5 @@
 # neo4j-bench
-Scripts needed to benchmark neo4j on the Piz Daint super computer
+Scripts needed to benchmark neo4j on the Piz Daint supercomputer
 
 ## Folder structure 
 Neo4j benchmark tool executable (the jar file should be located in the $HOME folder.)
